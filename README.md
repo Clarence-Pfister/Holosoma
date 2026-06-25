@@ -1,148 +1,229 @@
-# Holosoma
+# Kimodo to Holosoma G1 23-DoF Retargeting
 
-Holosoma (Greek: "whole-body") is a comprehensive humanoid robotics framework for training and deploying reinforcement learning policies on humanoid robots, as well as motion retargeting. Supports locomotion (velocity tracking) and whole-body tracking tasks across multiple simulators (IsaacGym, IsaacSim, MJWarp, MuJoCo) with algorithms like PPO and FastSAC.
+This guide converts a Kimodo-generated SMPL-X/AMASS motion into a Holosoma motion and retargets it to the Unitree G1 23-DoF robot.
 
-## Features
+The workflow is:
 
-- **Multi-simulator support**: IsaacGym, IsaacSim, MuJoCo Warp (MJWarp), and MuJoCo (inference only)
-- **Multiple RL algorithms**: PPO and FastSAC
-- **Robot support**: Unitree G1 and Booster T1 humanoids
-- **Task types**: Locomotion (velocity tracking) and whole-body tracking
-- **Sim-to-sim and sim-to-real deployment**: Shared inference pipeline across simulation and real robot control
-- **Motion retargeting**: Convert human motion capture data to robot motions while preserving interactions with objects and terrain
-- **Wandb integration**: Video logging, automatic ONNX checkpoint uploads, and direct checkpoint loading from Wandb
+1. Generate a human SMPL-X motion with Kimodo.
+2. Convert the Kimodo AMASS-style file to the format expected by Holosoma preprocessing.
+3. Run SMPL-X preprocessing to extract global joint positions.
+4. Retarget the processed SMPL-X motion to G1 23-DoF.
+5. Visualize the source and retargeted robot motions.
 
-## Repository Structure
+## Prerequisites
 
+- A working [Kimodo](https://github.com/nv-tlabs/kimodo) environment.
+- A [Holosoma](https://github.com/amazon-far/holosoma) repo mounted into the Holosoma retargeting Docker image.
+- The Holosoma retargeting Docker image, tagged locally as `holosoma-retargeting:latest`.
+- [SMPL-X model files](https://smpl-x.is.tue.mpg.de/) placed in the Holosoma repo:
+
+```text
+holosoma/smplx/SMPLX_NEUTRAL.npz
+holosoma/smplx/SMPLX_MALE.npz
+holosoma/smplx/SMPLX_FEMALE.npz
 ```
-src/
-├── holosoma/              # Core training framework (locomotion & whole-body tracking)
-├── holosoma_inference/    # Inference and deployment pipeline
-└── holosoma_retargeting/  # Motion retargeting from human motion data to robots
-```
 
-## Documentation
+At minimum, the gender file used by your AMASS/SMPL-X sequence must exist. Keeping all three is the simplest setup.
 
-- **[Training Guide](src/holosoma/README.md)** - Train locomotion and whole-body tracking policies in IsaacGym/IsaacSim
-- **[Inference & Deployment Guide](src/holosoma_inference/README.md)** - Deploy policies to real robots or evaluate in MuJoCo simulation
-- **[Retargeting Guide](src/holosoma_retargeting/holosoma_retargeting/README.md)** - Convert human motion capture data to robot motions
+## Paths And Motion Variables
 
-## Quick Start
-
-### Setup
-
-Choose the appropriate setup script based on your use case:
+Adjust these values for your machine and motion:
 
 ```bash
-# For IsaacGym training
-bash scripts/setup_isaacgym.sh
-
-# For IsaacSim training
-# Requires Ubuntu 22.04 or later due to IsaacSim dependencies
-bash scripts/setup_isaacsim.sh
-
-# For MJWarp training and MuJoCo simulation (inference) — conda
-bash scripts/setup_mujoco.sh
-
-# For MJWarp training and MuJoCo simulation (inference) — uv (alternative)
-bash scripts/setup_mujoco_via_uv.sh
-
-# For inference/deployment
-bash scripts/setup_inference.sh
-
-# For motion retargeting
-bash scripts/setup_retargeting.sh
+export HOST_HOLOSOMA_DIR=/path/to/holosoma
+export HOST_KIMODO_DIR=/path/to/kimodo
+export MOTION_NAME=my_motion
+export PROMPT="Describe the motion here."
+export DATASET_NAME=kimodo
+export TASK_NAME=holosoma_amass_${DATASET_NAME}_${MOTION_NAME}_stageii
 ```
 
-### Training
+Inside Docker, the Holosoma repo is mounted at:
 
-Train a G1 robot with FastSAC on IsaacGym:
+```text
+/workspace/holosoma
+```
+
+## 1. Generate A SMPL-X Motion With Kimodo
+
+Run this on the host, outside the Holosoma Docker container:
 
 ```bash
-source scripts/source_isaacgym_setup.sh
-python src/holosoma/holosoma/train_agent.py \
-    exp:g1-29dof-fast-sac \
-    simulator:isaacgym \
-    logger:wandb \
-    --training.seed 1
+cd "$HOST_KIMODO_DIR"
+conda activate kimodo
+
+kimodo_gen "$PROMPT" \
+  --model Kimodo-SMPLX-RP-v1 \
+  --duration 3.0 \
+  --output "$HOST_KIMODO_DIR/outputs/$MOTION_NAME"
 ```
 
-> **Note:** For headless servers, see the [training guide](src/holosoma/README.md#video-recording) for video recording configuration.
-
-See the [Training Guide](src/holosoma/README.md) for more examples and configuration options.
-
-### Quick Demo
-
-We provide scripts to run the complete pipeline: (data downloading and processing for LAFAN), retargeting, data conversion, and whole-body tracking policy training.
+Copy or move the generated AMASS-style `.npz` into the Holosoma repo:
 
 ```bash
-# Run retargeting and whole-body tracking policy training using OMOMO data
-bash demo_scripts/demo_omomo_wb_tracking.sh
-
-# Run retargeting and whole-body tracking policy training using LAFAN data
-bash demo_scripts/demo_lafan_wb_tracking.sh
+mkdir -p "$HOST_HOLOSOMA_DIR/motions/kimodo_amass"
+cp "$HOST_KIMODO_DIR/outputs/$MOTION_NAME"/*.npz \
+  "$HOST_HOLOSOMA_DIR/motions/kimodo_amass/${MOTION_NAME}_amass.npz"
 ```
 
-### Deployment & Evaluation
+## 2. Enter The Holosoma Docker Container
 
-After training, deploy your policies:
+Run this on the host:
 
-- **Real Robot**: See [Real Robot Locomotion](src/holosoma_inference/docs/workflows/real-robot-locomotion.md) or [Real Robot WBT](src/holosoma_inference/docs/workflows/real-robot-wbt.md)
-- **MuJoCo Simulation**: See [Sim-to-Sim Locomotion](src/holosoma_inference/docs/workflows/sim-to-sim-locomotion.md) or [Sim-to-Sim WBT](src/holosoma_inference/docs/workflows/sim-to-sim-wbt.md)
+```bash
+docker run --rm -it \
+  --name holosoma-retarget \
+  --network host \
+  --ipc host \
+  --privileged \
+  -v "$HOST_HOLOSOMA_DIR":/workspace/holosoma \
+  -w /workspace/holosoma \
+  holosoma-retargeting:latest \
+  /bin/bash
+```
 
-Or browse all deployment options in the [Inference & Deployment Guide](src/holosoma_inference/README.md).
+Inside Docker, initialize the Holosoma retargeting environment:
 
-### Demo Videos
+```bash
+source /workspace/holosoma/scripts/source_retargeting_setup.sh
+cd /workspace/holosoma/src/holosoma_retargeting/holosoma_retargeting
 
-Watch real-world deployments of Holosoma policies *(click thumbnails to play)*
+export MOTION_NAME=my_motion
+export DATASET_NAME=kimodo
+export TASK_NAME=holosoma_amass_${DATASET_NAME}_${MOTION_NAME}_stageii
+```
 
-<table>
-  <tr>
-    <th>G1 Locomotion</th>
-    <th>T1 Locomotion</th>
-    <th>G1 Dancing</th>
-  </tr>
-  <tr>
-    <td width="33%">
-      <a href="https://youtu.be/YYMgj5BDIMI">
-        <img src="https://img.youtube.com/vi/YYMgj5BDIMI/hqdefault.jpg" width="100%" alt="▶ G1 Locomotion">
-      </a>
-    </td>
-    <td width="33%">
-      <a href="https://youtu.be/Q6rNHJZ2a6Y">
-        <img src="https://img.youtube.com/vi/Q6rNHJZ2a6Y/hqdefault.jpg" width="100%" alt="▶ T1 Locomotion">
-      </a>
-    </td>
-    <td width="33%">
-      <a href="https://youtu.be/ouPk69_eFfE">
-        <img src="https://img.youtube.com/vi/ouPk69_eFfE/hqdefault.jpg" width="100%" alt="▶ G1 Dancing">
-      </a>
-    </td>
-  </tr>
-</table>
+## 3. Install SMPL-X Preprocessing Dependency
 
+Run this once inside Docker:
 
-## Issue Reporting
+```bash
+cd /workspace/holosoma
+mkdir -p thirdparty
+cd thirdparty
 
-We welcome feedback and issue reports to help improve holosoma. Please use issues to:
+git clone https://github.com/nghorbani/human_body_prior.git
+cd human_body_prior
+pip install -e . --no-deps
+pip install transforms3d
+```
 
-- Report bugs and technical issues
-- Request new features
+Return to the Holosoma package directory:
 
-## Support
+```bash
+cd /workspace/holosoma/src/holosoma_retargeting/holosoma_retargeting
+```
 
-If you need help with anything aside from issues feel free to join our [discord server](https://discord.gg/TPupMvpqHc).
+## 4. Convert Kimodo AMASS To Holosoma AMASS
 
-Use the discord to discuss larger plans and other more involved problems.
+This adds Holosoma's expected combined `poses` array to the Kimodo AMASS-style file.
 
-## Security
+```bash
+mkdir -p /workspace/holosoma/motions/holosoma_amass/${DATASET_NAME}
 
-See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more information.
+python data_utils/kimodo_amass_to_holosoma_amass.py \
+  /workspace/holosoma/motions/kimodo_amass/${MOTION_NAME}_amass.npz \
+  /workspace/holosoma/motions/holosoma_amass/${DATASET_NAME}/${MOTION_NAME}_stageii.npz
+```
 
-## Citation
+## 5. Preprocess AMASS/SMPL-X For Retargeting
 
-If you use Holosoma in your research, please cite it according to the "Cite this repository" panel on the right sidebar of the Github repo.
+This converts the AMASS/SMPL-X parameter file into global SMPL-X joint positions.
 
-## License
+```bash
+python data_utils/prep_amass_smplx_for_rt.py \
+  --amass-root-folder /workspace/holosoma/motions/holosoma_amass \
+  --output-folder /workspace/holosoma/motions/holosoma_smplx \
+  --model-root-folder /workspace/holosoma
+```
 
-This project is licensed under the Apache-2.0 License.
+Expected processed file:
+
+```text
+/workspace/holosoma/motions/holosoma_smplx/${TASK_NAME}.npz
+```
+
+## 6. Visualize The Source SMPL-X Motion
+
+Use this to check the human/source motion before retargeting:
+
+```bash
+python data_utils/visualize_smplx_joints.py \
+  /workspace/holosoma/motions/holosoma_smplx/${TASK_NAME}.npz
+```
+
+Open the Viser URL printed in the terminal. The viewer includes a frame slider, play/pause control, and FPS control.
+
+## 7. Retarget To G1 23-DoF
+
+Basic command:
+
+```bash
+python examples/robot_retarget.py \
+  --data-path /workspace/holosoma/motions/holosoma_smplx \
+  --task-type robot_only \
+  --task-name "$TASK_NAME" \
+  --data-format smplx \
+  --robot g1_23dof \
+  --save-dir /workspace/holosoma/motions/retargeted_g1_23dof
+```
+
+The `--task-name` must match the processed SMPL-X file name without `.npz`.
+
+Expected robot output:
+
+```text
+/workspace/holosoma/motions/retargeted_g1_23dof/${TASK_NAME}.npz
+```
+
+## 8. Optional Retargeting Knobs
+
+These are soft optimization costs. They do not force hard constraints; they only make the optimizer prefer certain solutions.
+
+### Direct Keypoint Tracking
+
+Track all mapped keypoints:
+
+```bash
+--retargeter.keypoint-tracking-weight 5.0
+```
+
+Track only shoulder/elbow/wrist/hand keypoints:
+
+```bash
+--retargeter.arm-keypoint-tracking-weight 50.0
+```
+
+Track only hip/knee/ankle/foot/toe keypoints:
+
+```bash
+--retargeter.leg-keypoint-tracking-weight 20.0
+```
+
+Use these when the interaction-mesh result has the right global shape but individual limbs do not follow the source well enough.
+
+### Root Orientation Tracking
+
+Track source-facing yaw, or keep the solved root roll/pitch close to the first solved frame:
+
+```bash
+--retargeter.root-yaw-tracking-weight 20.0
+--retargeter.root-roll-tracking-weight 20.0
+--retargeter.root-pitch-tracking-weight 20.0
+```
+
+Use these if the robot base rotates, leans sideways, or pitches forward/backward away from the intended motion.
+
+## 9. Visualize The Retargeted Robot Motion
+
+For robot-only motions, use `--no-assume-object-in-qpos`.
+
+```bash
+python viser_player.py \
+  --qpos-npz /workspace/holosoma/motions/retargeted_g1_23dof/${TASK_NAME}.npz \
+  --robot-urdf models/g1_23dof/g1_23dof_23dof.urdf \
+  --no-assume-object-in-qpos \
+  --loop
+```
+
+Open the Viser URL printed in the terminal.

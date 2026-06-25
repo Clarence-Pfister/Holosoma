@@ -90,3 +90,21 @@ class RetargeterConfig:
 
     nominal_tracking_tau: float = 1e6
     """Time constant for the nominal tracking cost."""
+
+    root_yaw_tracking_weight: float = 0.0
+    """Cost weight for tracking source human facing yaw. Set 0 to disable."""
+
+    root_roll_tracking_weight: float = 0.0
+    """Cost weight for keeping root roll near the first solved frame. Set 0 to disable."""
+
+    root_pitch_tracking_weight: float = 0.0
+    """Cost weight for keeping root pitch near the first solved frame. Set 0 to disable."""
+
+    keypoint_tracking_weight: float = 0.0
+    """Cost weight for directly tracking mapped source keypoint positions. Set 0 to disable."""
+
+    arm_keypoint_tracking_weight: float = 0.0
+    """Cost weight for directly tracking shoulder/elbow/wrist keypoints. Set 0 to disable."""
+
+    leg_keypoint_tracking_weight: float = 0.0
+    """Cost weight for directly tracking hip/knee/ankle/foot keypoints. Set 0 to disable."""

@@ -17,6 +17,7 @@ class RobotDefaults(TypedDict):
 
 _ROBOT_DEFAULTS: dict[str, RobotDefaults] = {
     "g1": {"robot_dof": 29, "robot_height": 1.32, "object_name": "ground"},
+    "g1_23dof": {"robot_dof": 23, "robot_height": 1.32, "object_name": "ground"},
     "t1": {"robot_dof": 23, "robot_height": 1.2, "object_name": "ground"},
 }
 
@@ -141,6 +142,17 @@ class RobotConfig:
                 "left_ankle_roll_sphere_4_link",
                 "right_ankle_roll_sphere_4_link",
             ]
+        if self.robot_type == "g1_23dof":
+            return [
+                "left_ankle_roll_sphere_1_link",
+                "right_ankle_roll_sphere_1_link",
+                "left_ankle_roll_sphere_2_link",
+                "right_ankle_roll_sphere_2_link",
+                "left_ankle_roll_sphere_3_link",
+                "right_ankle_roll_sphere_3_link",
+                "left_ankle_roll_sphere_4_link",
+                "right_ankle_roll_sphere_4_link",
+            ]
         if self.robot_type == "t1":
             return [
                 "left_foot_sphere_1_link",
@@ -181,6 +193,13 @@ class RobotConfig:
                     "35": -0.05,
                 }
             )
+        if self.robot_type == "g1_23dof":
+            base.update(
+                {
+                    "23": -0.1,  # left elbow
+                    "28": -0.1,  # right elbow
+                }
+            )
 
         return base
 
@@ -219,6 +238,16 @@ class RobotConfig:
 
         if self.robot_type == "g1":
             return {"19": 0.2, "20": 0.2}  # waist yaw, waist roll
+        if self.robot_type == "g1_23dof":
+            return {
+                "9": 0.1,  # left hip yaw
+                "15": 0.1,  # right hip yaw
+                "19": 0.2,  # waist yaw
+                "21": 0.05,  # left shoulder roll
+                "22": 0.05,  # left shoulder yaw
+                "26": 0.05,  # right shoulder roll
+                "27": 0.05,  # right shoulder yaw
+            }
         return {}
 
     MANUAL_COST = property(_manual_cost, doc="Get manual cost weights.")
@@ -229,6 +258,8 @@ class RobotConfig:
             return self.nominal_tracking_indices
 
         if self.robot_type == "g1":
+            return np.arange(19)
+        if self.robot_type == "g1_23dof":
             return np.arange(19)
         if self.robot_type == "t1":
             return np.concatenate([np.arange(7), np.arange(11, 23)])

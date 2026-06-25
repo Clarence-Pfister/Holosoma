@@ -61,6 +61,12 @@ class InteractionMeshRetargeter:
         debug: bool = False,
         w_nominal_tracking_init: float = 5.0,
         nominal_tracking_tau: float = 10.0,
+        root_yaw_tracking_weight: float = 0.0,
+        root_roll_tracking_weight: float = 0.0,
+        root_pitch_tracking_weight: float = 0.0,
+        keypoint_tracking_weight: float = 0.0,
+        arm_keypoint_tracking_weight: float = 0.0,
+        leg_keypoint_tracking_weight: float = 0.0,
     ):
         """This kinematic retargeter solves the diffIK problem with hard constraints in SQP style.
         During each SQP iteration, the problem is solved with the following constraints and costs:
@@ -82,6 +88,12 @@ class InteractionMeshRetargeter:
             foot_sticking_tolerance: tolerance for foot sticking constraints in x, y.
             foot_lock: configuration for explicit frame-range based foot locking constraints.
             nominal_tracking_tau: the time constant for the nominal tracking cost.
+            root_yaw_tracking_weight: cost weight for tracking source human facing yaw. 0 disables it.
+            root_roll_tracking_weight: cost weight for keeping root roll near the first solved frame. 0 disables it.
+            root_pitch_tracking_weight: cost weight for keeping root pitch near the first solved frame. 0 disables it.
+            keypoint_tracking_weight: cost weight for directly tracking mapped keypoints. 0 disables it.
+            arm_keypoint_tracking_weight: cost weight for directly tracking shoulder/elbow/wrist keypoints. 0 disables it.
+            leg_keypoint_tracking_weight: cost weight for directly tracking hip/knee/ankle/foot keypoints. 0 disables it.
         """
 
         self.robot_model_path = task_constants.ROBOT_URDF_FILE
@@ -140,18 +152,20 @@ class InteractionMeshRetargeter:
 
         self.nq_a = len(self.q_a_indices)
 
-        # Create complete limits with floating base (-inf, inf) and actuated joint limits
-        n_floating_base = 7
-        joint_names = [self.robot_model.joint(i).name for i in range(self.robot_model.njnt)]
-        actuated_joints = [(i, name) for i, name in enumerate(joint_names) if name]  # Filter out None names
-
         large_number = 1e6
-        complete_lower_limits = np.concatenate(
-            [-large_number * np.ones(n_floating_base), self.robot_model.jnt_range[[i for i, _ in actuated_joints], 0]]
-        )
-        complete_upper_limits = np.concatenate(
-            [large_number * np.ones(n_floating_base), self.robot_model.jnt_range[[i for i, _ in actuated_joints], 1]]
-        )
+        complete_lower_limits = -large_number * np.ones(self.robot_model.nq)
+        complete_upper_limits = large_number * np.ones(self.robot_model.nq)
+
+        for joint_id in range(self.robot_model.njnt):
+            joint_type = self.robot_model.jnt_type[joint_id]
+            if joint_type not in (mujoco.mjtJoint.mjJNT_HINGE, mujoco.mjtJoint.mjJNT_SLIDE):
+                continue
+            if not self.robot_model.jnt_limited[joint_id]:
+                continue
+
+            qpos_id = self.robot_model.jnt_qposadr[joint_id]
+            complete_lower_limits[qpos_id] = self.robot_model.jnt_range[joint_id, 0]
+            complete_upper_limits[qpos_id] = self.robot_model.jnt_range[joint_id, 1]
 
         self.q_a_lb = complete_lower_limits[self.q_a_indices]
         self.q_a_ub = complete_upper_limits[self.q_a_indices]
@@ -171,7 +185,89 @@ class InteractionMeshRetargeter:
 
         self.w_nominal_tracking_init = w_nominal_tracking_init
         self.nominal_tracking_tau = nominal_tracking_tau
+        self.root_yaw_tracking_weight = root_yaw_tracking_weight
+        self.root_roll_tracking_weight = root_roll_tracking_weight
+        self.root_pitch_tracking_weight = root_pitch_tracking_weight
+        self.keypoint_tracking_weight = keypoint_tracking_weight
+        self.arm_keypoint_tracking_weight = arm_keypoint_tracking_weight
+        self.leg_keypoint_tracking_weight = leg_keypoint_tracking_weight
         self.track_nominal_indices = task_constants.NOMINAL_TRACKING_INDICES
+
+    @staticmethod
+    def _roll_from_quat_wxyz(quat: np.ndarray) -> float:
+        quat = np.asarray(quat, dtype=float)
+        return float(Rotation.from_quat([quat[1], quat[2], quat[3], quat[0]]).as_euler("xyz")[0])
+
+    @staticmethod
+    def _yaw_from_quat_wxyz(quat: np.ndarray) -> float:
+        quat = np.asarray(quat, dtype=float)
+        return float(Rotation.from_quat([quat[1], quat[2], quat[3], quat[0]]).as_euler("xyz")[2])
+
+    @staticmethod
+    def _pitch_from_quat_wxyz(quat: np.ndarray) -> float:
+        quat = np.asarray(quat, dtype=float)
+        return float(Rotation.from_quat([quat[1], quat[2], quat[3], quat[0]]).as_euler("xyz")[1])
+
+    @staticmethod
+    def _quat_wxyz_with_roll(quat: np.ndarray, roll: float) -> np.ndarray:
+        quat = np.asarray(quat, dtype=float)
+        euler = Rotation.from_quat([quat[1], quat[2], quat[3], quat[0]]).as_euler("xyz")
+        euler[0] = roll
+        xyzw = Rotation.from_euler("xyz", euler).as_quat()
+        return np.array([xyzw[3], xyzw[0], xyzw[1], xyzw[2]])
+
+    @staticmethod
+    def _quat_wxyz_with_yaw(quat: np.ndarray, yaw: float) -> np.ndarray:
+        quat = np.asarray(quat, dtype=float)
+        euler = Rotation.from_quat([quat[1], quat[2], quat[3], quat[0]]).as_euler("xyz")
+        euler[2] = yaw
+        xyzw = Rotation.from_euler("xyz", euler).as_quat()
+        return np.array([xyzw[3], xyzw[0], xyzw[1], xyzw[2]])
+
+    @staticmethod
+    def _quat_wxyz_with_pitch(quat: np.ndarray, pitch: float) -> np.ndarray:
+        quat = np.asarray(quat, dtype=float)
+        euler = Rotation.from_quat([quat[1], quat[2], quat[3], quat[0]]).as_euler("xyz")
+        euler[1] = pitch
+        xyzw = Rotation.from_euler("xyz", euler).as_quat()
+        return np.array([xyzw[3], xyzw[0], xyzw[1], xyzw[2]])
+
+    def _human_facing_yaw_deltas(self, human_joint_motions: np.ndarray) -> np.ndarray | None:
+        if self.root_yaw_tracking_weight <= 0:
+            return None
+
+        joint_sets = [
+            ("L_Hip", "R_Hip", "L_Shoulder", "R_Shoulder"),
+            ("LeftUpLeg", "RightUpLeg", "LeftShoulder", "RightShoulder"),
+            ("LeftUpLeg", "RightUpLeg", "LeftArm", "RightArm"),
+        ]
+        selected = None
+        for names in joint_sets:
+            if all(name in self.demo_joints for name in names):
+                selected = tuple(self.demo_joints.index(name) for name in names)
+                break
+        if selected is None:
+            return None
+
+        left_hip_idx, right_hip_idx, left_shoulder_idx, right_shoulder_idx = selected
+        left = 0.5 * (human_joint_motions[:, left_hip_idx] + human_joint_motions[:, left_shoulder_idx])
+        right = 0.5 * (human_joint_motions[:, right_hip_idx] + human_joint_motions[:, right_shoulder_idx])
+        left_right = left - right
+        left_right[:, 2] = 0.0
+
+        yaws = []
+        last_yaw = 0.0
+        up = np.array([0.0, 0.0, 1.0])
+        for vec in left_right:
+            norm = np.linalg.norm(vec)
+            if norm > 1e-8:
+                lateral = vec / norm
+                forward = np.cross(lateral, up)
+                last_yaw = float(np.arctan2(forward[1], forward[0]))
+            yaws.append(last_yaw)
+
+        human_yaw = np.unwrap(np.asarray(yaws))
+        return human_yaw - human_yaw[0]
 
     def _init_foot_lock(self, foot_lock: FootLockConfig | None) -> None:
         """Initialize foot lock configuration and normalize window mappings."""
@@ -402,6 +498,10 @@ class InteractionMeshRetargeter:
 
         q_locked_list[:, -7:] = object_poses_augmented
         q = np.copy(q_locked_list[0])
+        root_yaw_deltas = self._human_facing_yaw_deltas(human_joint_motions)
+        root_yaw_anchor = None
+        root_roll_anchor = None
+        root_pitch_anchor = None
         retargeted_motions = [q]
 
         tetrahedra = []
@@ -470,6 +570,14 @@ class InteractionMeshRetargeter:
                     foot_sticking=foot_sticking_sequences[i],
                     w_nominal_tracking=w_nominal_tracking,
                     q_a_nominal=(q_nominal_list[i, self.q_a_indices] if q_nominal_list is not None else None),
+                    target_keypoints=human_mapped_joints_in_object,
+                    root_yaw_target=(
+                        root_yaw_anchor + root_yaw_deltas[i]
+                        if root_yaw_anchor is not None and root_yaw_deltas is not None
+                        else None
+                    ),
+                    root_roll_target=root_roll_anchor,
+                    root_pitch_target=root_pitch_anchor,
                     init_t=i == 0,
                     n_iter=50 if i == 0 else 10,
                     frame_idx=i,
@@ -481,6 +589,13 @@ class InteractionMeshRetargeter:
                     robot_kpts_handle_list = self.draw_keypoints(
                         robot_link_positions, name="robot_kpts", rgba=(0, 1, 0, 1)
                     )
+
+                if root_yaw_deltas is not None and root_yaw_anchor is None:
+                    root_yaw_anchor = self._yaw_from_quat_wxyz(q[3:7]) - root_yaw_deltas[i]
+                if self.root_roll_tracking_weight > 0 and root_roll_anchor is None:
+                    root_roll_anchor = self._roll_from_quat_wxyz(q[3:7])
+                if self.root_pitch_tracking_weight > 0 and root_pitch_anchor is None:
+                    root_pitch_anchor = self._pitch_from_quat_wxyz(q[3:7])
 
                 retargeted_motions.append(q)
                 if self.visualize and self.debug:
@@ -561,6 +676,10 @@ class InteractionMeshRetargeter:
         foot_sticking: tuple[bool, bool],
         w_nominal_tracking: float = 0.0,
         q_a_nominal: np.ndarray | None = None,
+        target_keypoints: np.ndarray | None = None,
+        root_yaw_target: float | None = None,
+        root_roll_target: float | None = None,
+        root_pitch_target: float | None = None,
         verbose=False,
         init_t=False,
         frame_idx: int = 0,
@@ -704,12 +823,78 @@ class InteractionMeshRetargeter:
 
         obj_terms.append(cp.sum_squares(cp.multiply(sqrt_w3, lap_var - target_lap_vec)))
 
+        if target_keypoints is not None and (
+            self.keypoint_tracking_weight > 0
+            or self.arm_keypoint_tracking_weight > 0
+            or self.leg_keypoint_tracking_weight > 0
+        ):
+            target_keypoints = np.asarray(target_keypoints, dtype=float)
+            if target_keypoints.shape != robot_pts_local.shape:
+                raise ValueError(
+                    f"target_keypoints must have shape {robot_pts_local.shape}, got {target_keypoints.shape}"
+                )
+
+            keypoint_weights = np.full(V_r, float(self.keypoint_tracking_weight), dtype=float)
+            if self.arm_keypoint_tracking_weight > 0:
+                arm_terms = ("shoulder", "elbow", "wrist", "arm", "forearm", "hand")
+                for idx_key, key in enumerate(robot_link_keys):
+                    if any(term in key.lower() for term in arm_terms):
+                        keypoint_weights[idx_key] = float(self.arm_keypoint_tracking_weight)
+
+            if self.leg_keypoint_tracking_weight > 0:
+                leg_terms = ("hip", "knee", "ankle", "foot", "toe", "leg")
+                for idx_key, key in enumerate(robot_link_keys):
+                    if any(term in key.lower() for term in leg_terms):
+                        keypoint_weights[idx_key] = float(self.leg_keypoint_tracking_weight)
+
+            active = keypoint_weights > 0
+            if np.any(active):
+                J_kp = J_V[: 3 * V_r, :][np.repeat(active, 3), :]
+                robot_kp_vec = robot_pts_local.reshape(-1)[np.repeat(active, 3)]
+                target_kp_vec = target_keypoints.reshape(-1)[np.repeat(active, 3)]
+                sqrt_kp_w = np.sqrt(np.repeat(keypoint_weights[active], 3))
+                kp_err = cp.Constant(J_kp) @ dqa + robot_kp_vec - target_kp_vec
+                obj_terms.append(cp.sum_squares(cp.multiply(sqrt_kp_w, kp_err)))
+
         # nominal tracking for selected indices
         if (w_nominal_tracking > 0) and (q_a_nominal is not None):
             idx = np.array(self.track_nominal_indices, dtype=int)
             if idx.size > 0:
                 z = dqa[idx] - (q_a_nominal[idx] - q_a_n_last[idx])
                 obj_terms.append(w_nominal_tracking * cp.sum_squares(z))
+
+        if root_yaw_target is not None and self.root_yaw_tracking_weight > 0:
+            quat_qpos_indices = np.array([3, 4, 5, 6])
+            local_indices = [np.where(self.q_a_indices == idx)[0] for idx in quat_qpos_indices]
+            if all(len(idx) == 1 for idx in local_indices):
+                local_indices = np.array([int(idx[0]) for idx in local_indices])
+                target_quat = self._quat_wxyz_with_yaw(q[3:7], root_yaw_target)
+                if np.dot(target_quat, q[3:7]) < 0:
+                    target_quat = -target_quat
+                z = dqa[local_indices] - (target_quat - q[3:7])
+                obj_terms.append(self.root_yaw_tracking_weight * cp.sum_squares(z))
+
+        if root_roll_target is not None and self.root_roll_tracking_weight > 0:
+            quat_qpos_indices = np.array([3, 4, 5, 6])
+            local_indices = [np.where(self.q_a_indices == idx)[0] for idx in quat_qpos_indices]
+            if all(len(idx) == 1 for idx in local_indices):
+                local_indices = np.array([int(idx[0]) for idx in local_indices])
+                target_quat = self._quat_wxyz_with_roll(q[3:7], root_roll_target)
+                if np.dot(target_quat, q[3:7]) < 0:
+                    target_quat = -target_quat
+                z = dqa[local_indices] - (target_quat - q[3:7])
+                obj_terms.append(self.root_roll_tracking_weight * cp.sum_squares(z))
+
+        if root_pitch_target is not None and self.root_pitch_tracking_weight > 0:
+            quat_qpos_indices = np.array([3, 4, 5, 6])
+            local_indices = [np.where(self.q_a_indices == idx)[0] for idx in quat_qpos_indices]
+            if all(len(idx) == 1 for idx in local_indices):
+                local_indices = np.array([int(idx[0]) for idx in local_indices])
+                target_quat = self._quat_wxyz_with_pitch(q[3:7], root_pitch_target)
+                if np.dot(target_quat, q[3:7]) < 0:
+                    target_quat = -target_quat
+                z = dqa[local_indices] - (target_quat - q[3:7])
+                obj_terms.append(self.root_pitch_tracking_weight * cp.sum_squares(z))
 
         # Q_diag cost
         Qd = np.asarray(self.Q_diag, dtype=float).reshape(-1)
@@ -827,6 +1012,10 @@ class InteractionMeshRetargeter:
         foot_sticking: tuple[bool, bool],
         w_nominal_tracking: float = 0.0,
         q_a_nominal: np.ndarray | None = None,
+        target_keypoints: np.ndarray | None = None,
+        root_yaw_target: float | None = None,
+        root_roll_target: float | None = None,
+        root_pitch_target: float | None = None,
         init_t: bool = False,
         n_iter: int = 10,
         frame_idx: int = 0,
@@ -845,6 +1034,10 @@ class InteractionMeshRetargeter:
                 foot_sticking=foot_sticking,
                 q_a_nominal=q_a_nominal,
                 w_nominal_tracking=w_nominal_tracking,
+                target_keypoints=target_keypoints,
+                root_yaw_target=root_yaw_target,
+                root_roll_target=root_roll_target,
+                root_pitch_target=root_pitch_target,
                 init_t=init_t,
                 frame_idx=frame_idx,
             )
