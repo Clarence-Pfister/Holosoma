@@ -41,3 +41,8 @@ wandb-metadata.json
 
 # BAZEL build artifacts
 BUILD.bazel
+
+# Local assets (not distributed with the fork)
+smplx/
+thirdparty/
+motions/
