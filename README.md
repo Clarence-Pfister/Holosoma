@@ -1,4 +1,23 @@
-# Holosoma
+# Holosoma (Clarence-Pfister fork)
+
+> **This is a fork of [amazon-far/holosoma](https://github.com/amazon-far/holosoma).**
+>
+> | Branch | Purpose |
+> | --- | --- |
+> | `main` | Mirrors upstream `main`, plus this fork notice. Kept clean so upstream syncs stay conflict-free. |
+> | `feature/g1-23dof` | Unitree G1 23-DoF support: robot model/meshes, retargeter changes, and the [Kimodo → G1 23-DoF retargeting guide](docs/kimodo-g1-23dof.md) ([日本語](docs/kimodo-g1-23dof.ja.md)). |
+>
+> **Syncing with upstream:**
+>
+> ```bash
+> git fetch upstream
+> git checkout main && git merge upstream/main
+> git checkout feature/g1-23dof && git merge main
+> ```
+>
+> Upstream's original README follows.
+
+---
 
 Holosoma (Greek: "whole-body") is a comprehensive humanoid robotics framework for training and deploying reinforcement learning policies on humanoid robots, as well as motion retargeting. Supports locomotion (velocity tracking) and whole-body tracking tasks across multiple simulators (IsaacGym, IsaacSim, MJWarp, MuJoCo) with algorithms like PPO and FastSAC.
 
